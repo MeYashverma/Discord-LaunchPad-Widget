@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Widget runtime artefacts
+widget.log*
+last_payload.json
+cache/
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
