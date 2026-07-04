@@ -1,12 +1,4 @@
-"""Entry point for the Discord LaunchPad Widget.
-
-Run with:
-
-    python -m launchpad_widget.main
-
-All runtime configuration is read from environment variables (see
-``config.py``). A config file can also be supplied via ``LAUNCHPAD_CONFIG``.
-"""
+"""Package entry point."""
 
 from __future__ import annotations
 
@@ -26,7 +18,10 @@ def main(argv: list[str] | None = None) -> int:
 
     config = AppConfig.load(config_path)
     configure_logging(config.log_file, level=config.log_level)
-    logger.info("Discord LaunchPad Widget starting up (preferred source=%s)", config.preferred_source)
+    logger.info(
+        "Discord LaunchPad Widget starting up (preferred source=%s)",
+        config.preferred_source,
+    )
 
     problems = config.validate()
     if problems:
