@@ -1,13 +1,4 @@
-"""Top-level orchestrator: glues providers, image service, builder, and updater.
-
-The orchestrator owns the long-lived loop and is the only thing the entry
-point needs to instantiate. It also handles:
-
-* the runtime budget (so we can self-restart before GitHub Actions kills us),
-* graceful Ctrl+C,
-* swapping to the next valid launch when the current one scrubs / launches,
-* logging of every step at INFO level.
-"""
+"""Top-level orchestrator."""
 
 from __future__ import annotations
 
@@ -34,29 +25,30 @@ logger = logging.getLogger(__name__)
 
 
 class ImageUploader:
-    """Optional helper that uploads a local image to Discord and returns the CDN URL.
+    """Uploads a local image to a Discord channel, returns the CDN URL."""
 
-    It is plugged into the orchestrator only when
-    ``DISCORD_TARGET_CHANNEL_ID`` is set. The Discord CDN URL the upload
-    returns is what we put in the widget's ``type: 3`` image field.
-    """
-
-    def __init__(self, *, bot_token: str, channel_id: str) -> None:
+    def __init__(self, *, bot_token: str, channel_id: str, http: HttpClient) -> None:
         self.bot_token = bot_token
         self.channel_id = channel_id
+        self.http = http
 
     def upload(self, local_path: str) -> str | None:
-        """Upload ``local_path`` and return the CDN URL, or None on failure."""
-        import requests
         if not local_path or not Path(local_path).is_file():
             return None
         url = f"https://discord.com/api/v9/channels/{self.channel_id}/messages"
-        headers = {"Authorization": f"Bot {self.bot_token}"}
+        path = Path(local_path)
         try:
-            with open(local_path, "rb") as f:
-                files = {"files[0]": (Path(local_path).name, f, "application/octet-stream")}
-                resp = requests.post(url, headers=headers, files=files, timeout=30)
-        except Exception as exc:  # noqa: BLE001
+            with path.open("rb") as f:
+                files = {
+                    "files[0]": (path.name, f, "application/octet-stream"),
+                }
+                resp = self.http.post_multipart(
+                    url,
+                    files=files,
+                    headers={"Authorization": f"Bot {self.bot_token}"},
+                    timeout=30.0,
+                )
+        except HTTPError as exc:
             logger.warning("Image upload to Discord failed: %s", exc)
             return None
         if not (200 <= resp.status_code < 300):
@@ -79,8 +71,6 @@ class ImageUploader:
 
 
 class WidgetOrchestrator:
-    """Drive the widget update loop."""
-
     def __init__(
         self,
         config: AppConfig,
@@ -104,10 +94,6 @@ class WidgetOrchestrator:
         self._last_patch_at: float = 0.0
         self._current_launch_id: str | None = None
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
-
     def request_stop(self, *_: Any) -> None:
         logger.info("Stop requested, finishing current cycle then exiting")
         self._stop_requested = True
@@ -117,15 +103,14 @@ class WidgetOrchestrator:
             signal.signal(signal.SIGINT, self.request_stop)
             signal.signal(signal.SIGTERM, self.request_stop)
         except (ValueError, OSError):
-            # Not in main thread / restricted environment
             pass
 
     def run(self) -> None:
-        """Run the update loop until the runtime budget expires or stop is requested."""
         self.install_signal_handlers()
         started = time.time()
         logger.info(
-            "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, dry_run=%s, image_uploader=%s",
+            "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, "
+            "dry_run=%s, image_uploader=%s",
             self.config.update_interval_seconds,
             self.config.max_runtime_seconds,
             self.config.dry_run,
@@ -142,25 +127,18 @@ class WidgetOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Cycle failed: %s", exc)
 
-            # Sleep with graceful shutdown support
             sleep_for = min(self.config.update_interval_seconds, budget_left)
             slept = 0.0
             while slept < sleep_for and not self._stop_requested:
                 time.sleep(min(1.0, sleep_for - slept))
                 slept += 1.0
 
-    # ------------------------------------------------------------------ #
-    # One cycle                                                           #
-    # ------------------------------------------------------------------ #
-
     def cycle(self) -> None:
-        """Fetch → normalize → image → build → PATCH."""
         launch = self._fetch_next_launch()
         if launch is None:
             logger.warning("No upcoming launch found, skipping this cycle")
             return
 
-        # Throttle Discord PATCHes to at most one per min_patch_interval
         if (time.time() - self._last_patch_at) < self.config.min_patch_interval_seconds:
             if self._current_launch_id == launch.external_id:
                 logger.info("Within min patch interval and same launch, skipping PATCH")
@@ -185,19 +163,9 @@ class WidgetOrchestrator:
             self._current_launch_id = launch.external_id
             self._summarise(launch, image_info)
 
-    # ------------------------------------------------------------------ #
-    # Fetching / provider selection                                       #
-    # ------------------------------------------------------------------ #
-
     def _fetch_next_launch(self) -> Launch | None:
-        """Pick the earliest valid launch from all configured providers.
-
-        We try the preferred source first, then fall back to the others.
-        Results are cached per provider for ``cache_ttl_seconds``.
-        """
         preferred, fallbacks = self._ordered_providers()
         ordered: list[LaunchProvider] = [preferred] + [p for p in fallbacks if p is not preferred]
-
         for provider in ordered:
             try:
                 cached = self.api_cache.get(f"next:{provider.name}")
@@ -213,17 +181,14 @@ class WidgetOrchestrator:
             except (HTTPError, Exception) as exc:  # noqa: BLE001
                 logger.warning("Provider %s failed: %s", provider.name, exc)
                 continue
-
             chosen = self._pick_next_valid(launches)
             if chosen is not None:
                 logger.info("Using provider %s, launch %s", provider.name, chosen.mission_name)
                 return chosen
-
         logger.warning("All providers failed to return a valid launch")
         return None
 
     def _ordered_providers(self) -> tuple[LaunchProvider, list[LaunchProvider]]:
-        """Return (preferred, all) based on config.preferred_source."""
         preferred: LaunchProvider | None = None
         all_providers = list(self.providers)
         for p in all_providers:
@@ -236,12 +201,6 @@ class WidgetOrchestrator:
 
     @staticmethod
     def _pick_next_valid(launches: list[Launch]) -> Launch | None:
-        """Pick the earliest launch whose NET is still in the future.
-
-        A launch with status "Success" or a failreason set is treated as
-        completed and skipped. A "Hold" status with a future timestamp is
-        still useful.
-        """
         now = datetime.now(timezone.utc)
         valid: list[tuple[datetime, Launch]] = []
         for l in launches:
@@ -268,13 +227,9 @@ class WidgetOrchestrator:
         valid.sort(key=lambda pair: pair[0])
         return valid[0][1]
 
-    # ------------------------------------------------------------------ #
-    # Logging                                                             #
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def _summarise(launch: Launch, image_info: dict[str, Any] | None) -> None:
-        img = image_info.get("source", "—") if image_info else "—"
+        img = image_info.get("source", "\u2014") if image_info else "\u2014"
         cdn = " (uploaded)" if image_info and image_info.get("cdn_url") else ""
         logger.info(
             "Updated widget: %s | rocket=%s | provider=%s | status=%s | image=%s%s",
@@ -287,52 +242,42 @@ class WidgetOrchestrator:
         )
 
 
-# ---------------------------------------------------------------------- #
-# Factory                                                                 #
-# ---------------------------------------------------------------------- #
-
-
 def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
-    """Build a default orchestrator with sensible production wiring."""
     http = HttpClient(
         timeout=config.http_timeout_seconds,
         retries=config.http_retries,
         backoff_factor=config.http_backoff_factor,
     )
-
     from ..utils.cache import ImageCache
     image_cache = ImageCache("cache/images", default_ttl=config.image_cache_ttl_seconds)
-
     image_service = ImageService(
         http=http,
         cache=image_cache,
         fallback_path=config.fallback_image_path,
         priority=config.image_priority,
     )
-    payload_builder = PayloadBuilder(image_priority=config.image_priority)
+    payload_builder = PayloadBuilder()
     updater = DiscordUpdater(
-        http=http,
+        http_session=http.session,
         app_id=config.discord_app_id,
         user_id=config.discord_user_id,
         bot_token=config.discord_bot_token,
         dry_run=config.dry_run,
         state_file=config.state_file,
+        timeout=config.http_timeout_seconds,
     )
-
     providers: list[LaunchProvider] = [
         LaunchLibrary2Provider(http=http),
         SpaceXProvider(http=http),
     ]
-
     image_uploader: ImageUploader | None = None
-    target_channel = os.environ.get("DISCORD_TARGET_CHANNEL_ID", "").strip()
-    if target_channel and config.discord_bot_token and not config.dry_run:
+    if config.discord_target_channel_id and config.discord_bot_token and not config.dry_run:
         image_uploader = ImageUploader(
             bot_token=config.discord_bot_token,
-            channel_id=target_channel,
+            channel_id=config.discord_target_channel_id,
+            http=http,
         )
-        logger.info("Image uploader enabled → channel %s", target_channel)
-
+        logger.info("Image uploader enabled → channel %s", config.discord_target_channel_id)
     return WidgetOrchestrator(
         config=config,
         http=http,
