@@ -102,23 +102,63 @@ def _prepare_square_image(
     input_path: Path,
     size: int = WIDGET_IMAGE_SIZE,
 ) -> Path | None:
-    """Resize ``input_path`` to a square ``size x size`` PNG.
+    """Resize and position ``input_path`` for the Discord widget image slot.
 
-    Uses Pillow's cover-fit (center-crop to maintain aspect, then resize).
-    The result is a square PNG saved next to the original with a ``-square``
-    suffix.  Returns the new path, or None on failure.
+    Discord's profile widget clips the TOP of the image with a soft curve.
+    If we center-crop a wide image to a square, the subject (rocket) ends
+    up in the middle, and the top half is wasted space that gets clipped.
+
+    The trick: take the BOTTOM 2/3 of the source image (where the rocket
+    actually is) and stretch that to a square.  This positions the
+    artwork in the lower portion of the square, leaving the upper
+    portion mostly transparent for Discord's title overlay.
+
+    The result is a square PNG saved next to the original with a
+    ``-square`` suffix.  Returns the new path, or None on failure.
     """
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image
     except ImportError:
         logger.warning("Pillow not installed; cannot pre-resize for D.W.I.F")
         return None
     try:
         with Image.open(input_path) as im:
             im = im.convert("RGBA")
-            fitted = ImageOps.fit(im, (size, size), method=Image.LANCZOS, centering=(0.5, 0.5))
+            src_w, src_h = im.size
+
+            # Step 1: take the bottom 2/3 of the source (vertically).
+            # This keeps the rocket / launch subject and drops the empty
+            # sky / padding that usually sits above it in launch photos.
+            keep_top = src_h // 3
+            cropped = im.crop((0, keep_top, src_w, src_h))
+            crop_w, crop_h = cropped.size
+
+            # Step 2: now we have a wide rectangle.  Resize it so its
+            # shorter side equals ``size``, preserving aspect ratio.
+            # For typical 16:9 launch photos this gives roughly 16:9
+            # * size x 9/16 * size; we'll letterbox/pillarbox to square
+            # next.
+            if crop_h >= crop_w:
+                new_h = size
+                new_w = int(round(crop_w * size / crop_h))
+            else:
+                new_w = size
+                new_h = int(round(crop_h * size / crop_w))
+            fitted = cropped.resize((new_w, new_h), Image.LANCZOS)
+
+            # Step 3: paste the resized image onto a transparent square
+            # canvas, **bottom-aligned** so the rocket stays at the
+            # bottom of the square.  This is the bit that fixes the
+            # "clipped nose cone" issue: the top of the square is
+            # transparent, so Discord's title overlay has room and the
+            # subject doesn't get cropped.
+            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            x = (size - new_w) // 2
+            y = size - new_h  # bottom-aligned
+            canvas.paste(fitted, (x, y), fitted)
+
             out = input_path.with_name(f"{input_path.stem}-square.png")
-            fitted.save(out, format="PNG", optimize=True)
+            canvas.save(out, format="PNG", optimize=True)
             return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to pre-resize image: %s", exc)
@@ -200,9 +240,15 @@ def process_image(
     # are too small at this size and produce a corner that does not blend
     # smoothly into the widget's clip path.
     if top_strip is None and target_size >= 1000:
-        top_strip = 110  # transparent band at the top for the title overlay
+        # The pre-resize already leaves the top of the square transparent
+        # (artwork is bottom-aligned).  Only a small extra strip is
+        # needed for the rounded corner geometry.  This keeps the subject
+        # in the lower half of the image where Discord shows it cleanly.
+        top_strip = 30
     if radius is None and target_size >= 1000:
-        radius = 220     # rounded top-right corner
+        # 220 is the D.W.I.F auto-calculated value at 1300px; we keep
+        # it to match Discord's clip path geometry.
+        radius = 220
     cmd = ["node", str(DWIF_SCRIPT), str(square_input), dwif_output.name]
     if top_strip is not None:
         cmd.append(str(top_strip))
