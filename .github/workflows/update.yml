@@ -1,0 +1,80 @@
+name: Update LaunchPad Widget
+
+# A long-lived daemon that keeps the Discord profile widget up to date with
+# the next scheduled space launch. The daemon exits on its own when it
+# approaches the ~5h50m runtime budget; the workflow then self-dispatches
+# the next run so the widget never goes stale.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Safety net in case the self-dispatch step fails for any reason.
+    # Tighter than the runtime budget so there's never a long gap.
+    - cron: "0 */6 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+# Only one live updater at a time — two daemons PATCHing the same Discord
+# widget concurrently would fight each other for the rate-limit bucket and
+# race the state file.
+concurrency:
+  group: launchpad-widget-daemon
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Outer safety net. widget.py exits cleanly before this fires.
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run widget daemon
+        env:
+          DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          # Optional: a channel the bot can write to. When set, the
+          # orchestrator will upload each picked image to this channel
+          # first and use the resulting Discord CDN URL in the widget.
+          # Otherwise the image field is left empty (Discord will not
+          # render a file:// URL).
+          DISCORD_TARGET_CHANNEL_ID: ${{ secrets.DISCORD_TARGET_CHANNEL_ID }}
+          # Optional: override loop timing without touching the repo
+          UPDATE_INTERVAL_SECONDS: ${{ vars.UPDATE_INTERVAL_SECONDS }}
+          MIN_PATCH_INTERVAL_SECONDS: ${{ vars.MIN_PATCH_INTERVAL_SECONDS }}
+          MAX_RUNTIME_SECONDS: ${{ vars.MAX_RUNTIME_SECONDS }}
+          PREFERRED_SOURCE: ${{ vars.PREFERRED_SOURCE }}
+          CACHE_TTL_SECONDS: ${{ vars.CACHE_TTL_SECONDS }}
+          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+        run: python widget.py
+
+      # Self-dispatch ONLY on clean exit, not on a crash.
+      # The widget daemon returns 0 when its runtime budget is exhausted
+      # or it receives SIGTERM/SIGINT. Any non-zero exit means the daemon
+      # crashed — in that case the 6h ``schedule:`` cron above is the
+      # fallback so the widget never goes stale, but we don't queue a
+      # tight follow-up run that would also crash.
+      - name: Trigger next run
+        if: success()
+        run: |
+          echo "Triggering next workflow run..."
+          curl -sS -f -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/update.yml/dispatches \
+            -d '{"ref":"${{ github.ref_name }}"}'
+          echo "Next run queued."
