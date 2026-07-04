@@ -1,0 +1,34 @@
+{
+  "discord_app_id": "",
+  "discord_user_id": "",
+  "discord_bot_token": "",
+
+  "preferred_source": "launch_library",
+
+  "update_interval_seconds": 300,
+  "min_patch_interval_seconds": 60,
+  "max_runtime_seconds": 21000,
+
+  "cache_ttl_seconds": 120,
+  "image_cache_ttl_seconds": 86400,
+
+  "http_timeout_seconds": 20,
+  "http_retries": 3,
+  "http_backoff_factor": 1.5,
+
+  "image_priority": [
+    "rocket",
+    "mission_patch",
+    "launch_artwork",
+    "launchpad"
+  ],
+  "fallback_image_path": "launchpad_widget/assets/fallback.png",
+
+  "dry_run": false,
+  "log_file": "widget.log",
+  "log_level": "INFO",
+  "state_file": "last_payload.json",
+
+  "nasa_api_key": "DEMO_KEY",
+  "show_iss_bonus": false
+}
