@@ -18,6 +18,7 @@ from ..models import Launch
 from ..utils.cache import TTLCache
 from ..utils.http_client import HTTPError, HttpClient
 from .discord_updater import DiscordUpdater
+from .dwif_runner import process_image as dwif_process
 from .image_service import ImageService
 from .payload_builder import PayloadBuilder
 
@@ -81,6 +82,7 @@ class WidgetOrchestrator:
         updater: DiscordUpdater,
         providers: list[LaunchProvider],
         image_uploader: ImageUploader | None = None,
+        use_dwif: bool = True,
     ) -> None:
         self.config = config
         self.http = http
@@ -89,6 +91,7 @@ class WidgetOrchestrator:
         self.updater = updater
         self.providers = providers
         self.image_uploader = image_uploader
+        self.use_dwif = use_dwif
         self.api_cache = TTLCache("cache/launches.json", default_ttl=config.cache_ttl_seconds)
         self._stop_requested = False
         self._last_patch_at: float = 0.0
@@ -110,11 +113,12 @@ class WidgetOrchestrator:
         started = time.time()
         logger.info(
             "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, "
-            "dry_run=%s, image_uploader=%s",
+            "dry_run=%s, image_uploader=%s, dwif=%s",
             self.config.update_interval_seconds,
             self.config.max_runtime_seconds,
             self.config.dry_run,
             "enabled" if self.image_uploader else "disabled",
+            "enabled" if self.use_dwif else "disabled",
         )
         while not self._stop_requested:
             budget_left = self.config.max_runtime_seconds - (time.time() - started)
@@ -145,12 +149,35 @@ class WidgetOrchestrator:
                 return
 
         image_info = self.image_service.best_image_for(launch)
-        if image_info and self.image_uploader is not None and not self.config.dry_run:
+        if image_info is None:
+            logger.warning("No image could be picked (incl. fallback); sending without image")
+            image_info = {"url": "", "source": "none", "local_path": ""}
+
+        # 1. Run D.W.I.F (Discord Widget Image Fixer) on the picked image to
+        #    add the transparent top strip and rounded top-right corner.
+        #    D.W.I.F also re-saves the file as a proper PNG which makes the
+        #    CDN URL look clean (no more ".bin" filenames).
+        if image_info.get("local_path") and self.use_dwif:
+            processed = dwif_process(image_info["local_path"])
+            if processed:
+                image_info = dict(image_info)
+                image_info["local_path"] = str(processed)
+                image_info["source"] = (
+                    f"{image_info.get('source', 'image')}+dwif"
+                )
+
+        # 2. Upload the styled image to Discord and grab a cdn.discordapp.com URL.
+        if (
+            image_info.get("local_path")
+            and self.image_uploader is not None
+            and not self.config.dry_run
+        ):
             cdn_url = self.image_uploader.upload(image_info["local_path"])
             if cdn_url:
                 image_info = dict(image_info)
                 image_info["cdn_url"] = cdn_url
 
+        # 3. Build the Discord identity payload and PATCH the widget.
         payload = self.payload_builder.build(launch, image_info=image_info)
         try:
             ok = self.updater.push(payload)
@@ -278,6 +305,7 @@ def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
             http=http,
         )
         logger.info("Image uploader enabled → channel %s", config.discord_target_channel_id)
+
     return WidgetOrchestrator(
         config=config,
         http=http,
@@ -286,4 +314,5 @@ def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
         updater=updater,
         providers=providers,
         image_uploader=image_uploader,
+        use_dwif=True,
     )
