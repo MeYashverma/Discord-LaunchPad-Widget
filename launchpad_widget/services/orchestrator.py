@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -32,6 +33,51 @@ from .payload_builder import PayloadBuilder
 logger = logging.getLogger(__name__)
 
 
+class ImageUploader:
+    """Optional helper that uploads a local image to Discord and returns the CDN URL.
+
+    It is plugged into the orchestrator only when
+    ``DISCORD_TARGET_CHANNEL_ID`` is set. The Discord CDN URL the upload
+    returns is what we put in the widget's ``type: 3`` image field.
+    """
+
+    def __init__(self, *, bot_token: str, channel_id: str) -> None:
+        self.bot_token = bot_token
+        self.channel_id = channel_id
+
+    def upload(self, local_path: str) -> str | None:
+        """Upload ``local_path`` and return the CDN URL, or None on failure."""
+        import requests
+        if not local_path or not Path(local_path).is_file():
+            return None
+        url = f"https://discord.com/api/v9/channels/{self.channel_id}/messages"
+        headers = {"Authorization": f"Bot {self.bot_token}"}
+        try:
+            with open(local_path, "rb") as f:
+                files = {"files[0]": (Path(local_path).name, f, "application/octet-stream")}
+                resp = requests.post(url, headers=headers, files=files, timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Image upload to Discord failed: %s", exc)
+            return None
+        if not (200 <= resp.status_code < 300):
+            logger.warning(
+                "Image upload to Discord returned %d: %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        attachments = data.get("attachments") or []
+        if not attachments:
+            return None
+        cdn_url = attachments[0].get("url") or ""
+        if cdn_url:
+            logger.info("Image uploaded to Discord CDN: %s", cdn_url)
+        return cdn_url
+
+
 class WidgetOrchestrator:
     """Drive the widget update loop."""
 
@@ -44,6 +90,7 @@ class WidgetOrchestrator:
         payload_builder: PayloadBuilder,
         updater: DiscordUpdater,
         providers: list[LaunchProvider],
+        image_uploader: ImageUploader | None = None,
     ) -> None:
         self.config = config
         self.http = http
@@ -51,6 +98,7 @@ class WidgetOrchestrator:
         self.payload_builder = payload_builder
         self.updater = updater
         self.providers = providers
+        self.image_uploader = image_uploader
         self.api_cache = TTLCache("cache/launches.json", default_ttl=config.cache_ttl_seconds)
         self._stop_requested = False
         self._last_patch_at: float = 0.0
@@ -77,10 +125,11 @@ class WidgetOrchestrator:
         self.install_signal_handlers()
         started = time.time()
         logger.info(
-            "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, dry_run=%s",
+            "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, dry_run=%s, image_uploader=%s",
             self.config.update_interval_seconds,
             self.config.max_runtime_seconds,
             self.config.dry_run,
+            "enabled" if self.image_uploader else "disabled",
         )
         while not self._stop_requested:
             budget_left = self.config.max_runtime_seconds - (time.time() - started)
@@ -118,6 +167,12 @@ class WidgetOrchestrator:
                 return
 
         image_info = self.image_service.best_image_for(launch)
+        if image_info and self.image_uploader is not None and not self.config.dry_run:
+            cdn_url = self.image_uploader.upload(image_info["local_path"])
+            if cdn_url:
+                image_info = dict(image_info)
+                image_info["cdn_url"] = cdn_url
+
         payload = self.payload_builder.build(launch, image_info=image_info)
         try:
             ok = self.updater.push(payload)
@@ -169,8 +224,6 @@ class WidgetOrchestrator:
 
     def _ordered_providers(self) -> tuple[LaunchProvider, list[LaunchProvider]]:
         """Return (preferred, all) based on config.preferred_source."""
-        # We can identify providers by class name; the orchestrator doesn't
-        # know the HTTP client at construction time so we ask the provider.
         preferred: LaunchProvider | None = None
         all_providers = list(self.providers)
         for p in all_providers:
@@ -222,13 +275,15 @@ class WidgetOrchestrator:
     @staticmethod
     def _summarise(launch: Launch, image_info: dict[str, Any] | None) -> None:
         img = image_info.get("source", "—") if image_info else "—"
+        cdn = " (uploaded)" if image_info and image_info.get("cdn_url") else ""
         logger.info(
-            "Updated widget: %s | rocket=%s | provider=%s | status=%s | image=%s",
+            "Updated widget: %s | rocket=%s | provider=%s | status=%s | image=%s%s",
             launch.mission_name,
             launch.rocket_name,
             launch.launch_provider,
             launch.launch_status or "Scheduled",
             img,
+            cdn,
         )
 
 
@@ -269,6 +324,15 @@ def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
         SpaceXProvider(http=http),
     ]
 
+    image_uploader: ImageUploader | None = None
+    target_channel = os.environ.get("DISCORD_TARGET_CHANNEL_ID", "").strip()
+    if target_channel and config.discord_bot_token and not config.dry_run:
+        image_uploader = ImageUploader(
+            bot_token=config.discord_bot_token,
+            channel_id=target_channel,
+        )
+        logger.info("Image uploader enabled → channel %s", target_channel)
+
     return WidgetOrchestrator(
         config=config,
         http=http,
@@ -276,4 +340,5 @@ def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
         payload_builder=payload_builder,
         updater=updater,
         providers=providers,
+        image_uploader=image_uploader,
     )
