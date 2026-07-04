@@ -78,6 +78,17 @@ class DiscordUpdater:
             self._record_success(signature)
             return True
 
+        # Some Discord endpoints return 401 transiently when the request
+        # comes from a freshly-issued IP (e.g. CI runner).  Retry once with
+        # a short backoff; if it still 401s the token really is bad.
+        if resp.status_code == 401 and not getattr(self, "_retried", False):
+            time.sleep(2.0)
+            self._retried = True
+            try:
+                return self.push(payload)
+            finally:
+                self._retried = False
+
         raise HTTPError(
             f"Discord PATCH failed: {resp.status_code} {resp.reason} — {resp.text[:300]}"
         )
