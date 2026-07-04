@@ -12,8 +12,12 @@ from .retry import call_with_retries
 logger = logging.getLogger(__name__)
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Discord-LaunchPad-Widget/1.0",
+    # Discord's bot auth check is friendlier when the UA identifies as a
+    # Discord bot library.  python-requests' default UA often gets
+    # challenged with 401 on shared IP ranges (e.g. CI runners).
+    "User-Agent": "DiscordBot (https://github.com/MeYashverma/Discord-LaunchPad-Widget, 1.0.0)",
     "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 
