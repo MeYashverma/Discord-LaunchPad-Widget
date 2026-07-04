@@ -1,4 +1,4 @@
-"""Tiny retry helper for HTTP and image fetches."""
+"""Tiny retry helper."""
 
 from __future__ import annotations
 
@@ -21,13 +21,6 @@ def call_with_retries(
     retry_on: tuple[type[BaseException], ...] = (requests.RequestException, TimeoutError),
     label: str = "operation",
 ) -> T:
-    """Call ``func`` up to ``attempts`` times with exponential backoff.
-
-    Returns whatever ``func`` returns on the first successful call. If every
-    attempt raises one of ``retry_on`` (or a subclass), the final exception is
-    re-raised. Any other exception is re-raised immediately because it is
-    almost certainly a programming error, not a transient network problem.
-    """
     if attempts < 1:
         attempts = 1
     last_exc: BaseException | None = None
