@@ -195,6 +195,14 @@ def process_image(
     final_output.parent.mkdir(parents=True, exist_ok=True)
 
     # D.W.I.F's argv: process-image.mjs <inputPath> <outputName> <topStrip> <radius> <fastAnimated>
+    # When target_size is 1300, use manual topStrip/radius values that
+    # match the actual Discord widget shape.  The auto-calculated values
+    # are too small at this size and produce a corner that does not blend
+    # smoothly into the widget's clip path.
+    if top_strip is None and target_size >= 1000:
+        top_strip = 110  # transparent band at the top for the title overlay
+    if radius is None and target_size >= 1000:
+        radius = 220     # rounded top-right corner
     cmd = ["node", str(DWIF_SCRIPT), str(square_input), dwif_output.name]
     if top_strip is not None:
         cmd.append(str(top_strip))
