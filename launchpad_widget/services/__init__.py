@@ -1,4 +1,4 @@
-"""Service layer (image handling, payload building, Discord updater, orchestrator)."""
+"""Service layer."""
 
 from .image_service import ImageService
 from .payload_builder import PayloadBuilder
