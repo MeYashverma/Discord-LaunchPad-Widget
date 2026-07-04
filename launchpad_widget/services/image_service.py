@@ -37,16 +37,31 @@ class ImageService:
         self.http = http
         self.cache = cache
         self.fallback_path = Path(fallback_path)
+        # Map short names used in config to actual Launch dataclass fields.
+        # Users can write either short (``"rocket"``) or full
+        # (``"rocket_image_url"``) names in config.
         self.priority = priority or [
-            "rocket_image_url",
-            "mission_patch_url",
-            "launch_artwork_url",
-            "launchpad_image_url",
+            "rocket",
+            "mission_patch",
+            "launch_artwork",
+            "launchpad",
         ]
+        self._attr_map = {
+            "rocket": "rocket_image_url",
+            "mission_patch": "mission_patch_url",
+            "launch_artwork": "launch_artwork_url",
+            "launchpad": "launchpad_image_url",
+            # Also accept the full field names directly
+            "rocket_image_url": "rocket_image_url",
+            "mission_patch_url": "mission_patch_url",
+            "launch_artwork_url": "launch_artwork_url",
+            "launchpad_image_url": "launchpad_image_url",
+        }
 
     def best_image_for(self, launch: Launch) -> dict[str, Any] | None:
         """Return {"url", "source", "local_path"} or None."""
-        for attr in self.priority:
+        for name in self.priority:
+            attr = self._attr_map.get(name, name)
             url = getattr(launch, attr, "")
             if not url:
                 continue
@@ -55,11 +70,11 @@ class ImageService:
                 if path is not None:
                     return {
                         "url": url,
-                        "source": attr,
+                        "source": name,
                         "local_path": str(path),
                     }
             except (HTTPError, OSError) as exc:
-                logger.warning("Image fetch failed for %s (%s): %s", url, attr, exc)
+                logger.warning("Image fetch failed for %s (%s): %s", url, name, exc)
         return self._fallback()
 
     def _download(self, url: str) -> Path | None:

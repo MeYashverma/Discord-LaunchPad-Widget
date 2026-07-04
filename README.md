@@ -63,6 +63,26 @@ Field names must match the Data Field names in your Discord widget editor
 
 Both are free, no auth, plenty of rate limit for this use case.
 
+## Image processing (D.W.I.F)
+
+The widget image is processed through [D.W.I.F](https://github.com/AjaxFNC-YT/D.W.I.F)
+(Discord Widget Image Fixer) before being uploaded. D.W.I.F adds a transparent
+top strip + rounded top-right corner so the image clips correctly inside
+Discord's widget rounded rectangle.
+
+The daemon handles the D.W.I.F install automatically on first run:
+
+1. Detects Node.js (set up in the workflow via `actions/setup-node`)
+2. Clones D.W.I.F into `./dwif/`
+3. Runs `npm install --omit=dev` to install dependencies
+4. Calls D.W.I.F's `process-image.mjs` on every picked launch image
+5. Uploads the styled image to your Discord channel
+6. Uses the resulting `cdn.discordapp.com` URL in the widget payload
+
+If Node.js or D.W.I.F are unavailable, the daemon gracefully falls back
+to uploading the unprocessed image (still works, just without the rounded
+corner / top strip).
+
 ---
 
 ## Setup

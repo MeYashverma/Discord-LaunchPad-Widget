@@ -86,7 +86,15 @@ class LaunchLibrary2Provider:
 
         rocket_image = configuration.get("image_url") or ""
         mission_patch = (mission.get("image") or {}).get("image_url") or ""
-        launch_artwork = item.get("image") or ""
+        # ``item.get("image")`` is a dict on the LL2 v2.3 API; older versions
+        # returned a bare URL string.  Handle both.
+        _artwork = item.get("image")
+        if isinstance(_artwork, dict):
+            launch_artwork = _artwork.get("image_url") or _artwork.get("url") or ""
+        elif isinstance(_artwork, str):
+            launch_artwork = _artwork
+        else:
+            launch_artwork = ""
         launchpad_image = pad.get("image_url") or ""
 
         crew: list[CrewMember] = []
