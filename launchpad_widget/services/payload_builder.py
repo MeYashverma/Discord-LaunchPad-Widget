@@ -1,344 +1,275 @@
-"""Top-level orchestrator: glues providers, image service, builder, and updater.
+"""Build the Discord Dynamic Identity JSON payload.
 
-The orchestrator owns the long-lived loop and is the only thing the entry
-point needs to instantiate. It also handles:
+Discord identity fields have a ``type`` of:
 
-* the runtime budget (so we can self-restart before GitHub Actions kills us),
-* graceful Ctrl+C,
-* swapping to the next valid launch when the current one scrubs / launches,
-* logging of every step at INFO level.
+    1 = string (text)
+    2 = number
+    3 = image (nested ``value.url``)
+
+The exact list of field names the widget displays is configured to match
+the Data Fields in the Discord widget editor.  Keep this list in sync with
+``docs/FIELDS.md``.
+
+Reference (PATCH endpoint body shape):
+
+    PATCH /applications/{APP_ID}/users/{USER_ID}/identities/0/profile
+    Body: {"identities": [[ {"name": "...", "type": 1|2|3, "value": ...}, ... ]]}
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import signal
-import time
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..apis import LaunchLibrary2Provider, SpaceXProvider
-from ..apis.base import LaunchProvider
-from ..config import AppConfig
 from ..models import Launch
-from ..utils.cache import TTLCache
-from ..utils.http_client import HTTPError, HttpClient
-from .discord_updater import DiscordUpdater
-from .image_service import ImageService
-from .payload_builder import PayloadBuilder
 
 logger = logging.getLogger(__name__)
 
 
-class ImageUploader:
-    """Optional helper that uploads a local image to Discord and returns the CDN URL.
+# Field name constants — these MUST match the Data Field names configured
+# in the Discord widget editor.  Keep them short, Discord truncates long
+# values.
+FIELD_MISSION = "mission"
+FIELD_ROCKET = "rocket"
+FIELD_PROVIDER = "provider"
+FIELD_STATUS = "status"
+FIELD_COUNTDOWN = "countdown"
+FIELD_WINDOW = "window"
+FIELD_SITE = "site"
+FIELD_LOCATION = "location"
+FIELD_COUNTRY = "country"
+FIELD_ORBIT = "orbit"
+FIELD_CREW = "crew"
+FIELD_TYPE = "type"
+FIELD_PROBABILITY = "probability"
+FIELD_IMAGE = "image"
 
-    It is plugged into the orchestrator only when
-    ``DISCORD_TARGET_CHANNEL_ID`` is set. The Discord CDN URL the upload
-    returns is what we put in the widget's ``type: 3`` image field.
-    """
-
-    def __init__(self, *, bot_token: str, channel_id: str) -> None:
-        self.bot_token = bot_token
-        self.channel_id = channel_id
-
-    def upload(self, local_path: str) -> str | None:
-        """Upload ``local_path`` and return the CDN URL, or None on failure."""
-        import requests
-        if not local_path or not Path(local_path).is_file():
-            return None
-        url = f"https://discord.com/api/v9/channels/{self.channel_id}/messages"
-        headers = {"Authorization": f"Bot {self.bot_token}"}
-        try:
-            with open(local_path, "rb") as f:
-                files = {"files[0]": (Path(local_path).name, f, "application/octet-stream")}
-                resp = requests.post(url, headers=headers, files=files, timeout=30)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Image upload to Discord failed: %s", exc)
-            return None
-        if not (200 <= resp.status_code < 300):
-            logger.warning(
-                "Image upload to Discord returned %d: %s",
-                resp.status_code, resp.text[:200],
-            )
-            return None
-        try:
-            data = resp.json()
-        except ValueError:
-            return None
-        attachments = data.get("attachments") or []
-        if not attachments:
-            return None
-        cdn_url = attachments[0].get("url") or ""
-        if cdn_url:
-            logger.info("Image uploaded to Discord CDN: %s", cdn_url)
-        return cdn_url
+# Discord dynamic-identity type codes
+TYPE_STRING = 1
+TYPE_NUMBER = 2
+TYPE_IMAGE = 3
 
 
-class WidgetOrchestrator:
-    """Drive the widget update loop."""
+# Discord's text field limit is generous but not infinite; 512 chars is a
+# safe upper bound for a single line of widget text.
+MAX_TEXT_LEN = 480
+
+
+# The set of fields the widget editor defines.  The daemon always sends
+# exactly these (in this order) so that Discord binds every slot.
+DEFAULT_FIELD_ORDER: list[str] = [
+    FIELD_MISSION,
+    FIELD_ROCKET,
+    FIELD_PROVIDER,
+    FIELD_STATUS,
+    FIELD_COUNTDOWN,
+    FIELD_WINDOW,
+    FIELD_SITE,
+    FIELD_LOCATION,
+    FIELD_COUNTRY,
+    FIELD_ORBIT,
+    FIELD_CREW,
+    FIELD_TYPE,
+    FIELD_PROBABILITY,
+    FIELD_IMAGE,
+]
+
+
+def _truncate(text: str, limit: int = MAX_TEXT_LEN) -> str:
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        # 'Z' suffix is not understood by fromisoformat in <3.11
+        cleaned = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+
+def _format_countdown(seconds: int) -> str:
+    """Format a non-negative number of seconds as ``Dd HH:MM:SS``."""
+    if seconds < 0:
+        seconds = 0
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days > 0:
+        return f"T-{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"T-{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _format_window(launch: Launch) -> str:
+    start = (launch.extra or {}).get("window_start") or launch.launch_timestamp_utc
+    end = (launch.extra or {}).get("window_end")
+    if not start:
+        return "TBD"
+    s = _parse_iso(start)
+    if not s:
+        return _truncate(start, 40)
+    pretty = s.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if end:
+        e = _parse_iso(end)
+        if e:
+            pretty += " → " + e.astimezone(timezone.utc).strftime("%H:%M UTC")
+    return _truncate(pretty, 80)
+
+
+class PayloadBuilder:
+    """Builds the JSON payload for the Discord PATCH endpoint."""
 
     def __init__(
         self,
-        config: AppConfig,
         *,
-        http: HttpClient,
-        image_service: ImageService,
-        payload_builder: PayloadBuilder,
-        updater: DiscordUpdater,
-        providers: list[LaunchProvider],
-        image_uploader: ImageUploader | None = None,
+        image_priority: list[str] | None = None,
+        field_order: list[str] | None = None,
     ) -> None:
-        self.config = config
-        self.http = http
-        self.image_service = image_service
-        self.payload_builder = payload_builder
-        self.updater = updater
-        self.providers = providers
-        self.image_uploader = image_uploader
-        self.api_cache = TTLCache("cache/launches.json", default_ttl=config.cache_ttl_seconds)
-        self._stop_requested = False
-        self._last_patch_at: float = 0.0
-        self._current_launch_id: str | None = None
+        self.image_priority = image_priority or [
+            "rocket", "mission_patch", "launch_artwork", "launchpad"
+        ]
+        # Override the default field set if the user wants a subset.
+        self.field_order = field_order or list(DEFAULT_FIELD_ORDER)
 
     # ------------------------------------------------------------------ #
-    # Lifecycle                                                           #
+    # Public API                                                          #
     # ------------------------------------------------------------------ #
 
-    def request_stop(self, *_: Any) -> None:
-        logger.info("Stop requested, finishing current cycle then exiting")
-        self._stop_requested = True
+    def build(
+        self,
+        launch: Launch,
+        *,
+        image_info: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return the ``identities`` payload to send to Discord.
 
-    def install_signal_handlers(self) -> None:
-        try:
-            signal.signal(signal.SIGINT, self.request_stop)
-            signal.signal(signal.SIGTERM, self.request_stop)
-        except (ValueError, OSError):
-            # Not in main thread / restricted environment
-            pass
-
-    def run(self) -> None:
-        """Run the update loop until the runtime budget expires or stop is requested."""
-        self.install_signal_handlers()
-        started = time.time()
-        logger.info(
-            "Starting orchestrator: interval=%.0fs, runtime budget=%.0fs, dry_run=%s, image_uploader=%s",
-            self.config.update_interval_seconds,
-            self.config.max_runtime_seconds,
-            self.config.dry_run,
-            "enabled" if self.image_uploader else "disabled",
-        )
-        while not self._stop_requested:
-            budget_left = self.config.max_runtime_seconds - (time.time() - started)
-            if budget_left <= 0:
-                logger.info("Runtime budget exhausted, exiting cleanly")
-                break
-
-            try:
-                self.cycle()
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Cycle failed: %s", exc)
-
-            # Sleep with graceful shutdown support
-            sleep_for = min(self.config.update_interval_seconds, budget_left)
-            slept = 0.0
-            while slept < sleep_for and not self._stop_requested:
-                time.sleep(min(1.0, sleep_for - slept))
-                slept += 1.0
-
-    # ------------------------------------------------------------------ #
-    # One cycle                                                           #
-    # ------------------------------------------------------------------ #
-
-    def cycle(self) -> None:
-        """Fetch → normalize → image → build → PATCH."""
-        launch = self._fetch_next_launch()
-        if launch is None:
-            logger.warning("No upcoming launch found, skipping this cycle")
-            return
-
-        # Throttle Discord PATCHes to at most one per min_patch_interval
-        if (time.time() - self._last_patch_at) < self.config.min_patch_interval_seconds:
-            if self._current_launch_id == launch.external_id:
-                logger.info("Within min patch interval and same launch, skipping PATCH")
-                return
-
-        image_info = self.image_service.best_image_for(launch)
-        if image_info and self.image_uploader is not None and not self.config.dry_run:
-            cdn_url = self.image_uploader.upload(image_info["local_path"])
-            if cdn_url:
-                image_info = dict(image_info)
-                image_info["cdn_url"] = cdn_url
-
-        payload = self.payload_builder.build(launch, image_info=image_info)
-        try:
-            ok = self.updater.push(payload)
-        except HTTPError as exc:
-            logger.error("PATCH failed: %s", exc)
-            return
-
-        if ok:
-            self._last_patch_at = time.time()
-            self._current_launch_id = launch.external_id
-            self._summarise(launch, image_info)
-
-    # ------------------------------------------------------------------ #
-    # Fetching / provider selection                                       #
-    # ------------------------------------------------------------------ #
-
-    def _fetch_next_launch(self) -> Launch | None:
-        """Pick the earliest valid launch from all configured providers.
-
-        We try the preferred source first, then fall back to the others.
-        Results are cached per provider for ``cache_ttl_seconds``.
+        Discord's PATCH endpoint expects the body to be ``{"identities": [...]}``,
+        where each identity is a list of field dicts with ``name`` and
+        ``value`` keys plus a ``type`` of 1 (string), 2 (number) or 3 (image).
         """
-        preferred, fallbacks = self._ordered_providers()
-        ordered: list[LaunchProvider] = [preferred] + [p for p in fallbacks if p is not preferred]
+        now = now or datetime.now(timezone.utc)
+        all_fields: dict[str, dict[str, Any]] = {}
 
-        for provider in ordered:
-            try:
-                cached = self.api_cache.get(f"next:{provider.name}")
-                if cached is not None:
-                    launches = [Launch.from_dict(item) for item in cached]
-                else:
-                    launches = provider.next_launches(limit=5)
-                    self.api_cache.set(
-                        f"next:{provider.name}",
-                        [l.to_dict() for l in launches],
-                        ttl=self.config.cache_ttl_seconds,
-                    )
-            except (HTTPError, Exception) as exc:  # noqa: BLE001
-                logger.warning("Provider %s failed: %s", provider.name, exc)
-                continue
+        net = _parse_iso(launch.launch_timestamp_utc)
+        seconds_left = 0
+        if net is not None:
+            seconds_left = max(int((net - now).total_seconds()), 0)
+        countdown_str = _format_countdown(seconds_left)
 
-            chosen = self._pick_next_valid(launches)
-            if chosen is not None:
-                logger.info("Using provider %s, launch %s", provider.name, chosen.mission_name)
-                return chosen
+        # --- Build every field up-front so order is deterministic --- #
+        all_fields[FIELD_MISSION] = self._str(
+            FIELD_MISSION, _truncate(launch.mission_name, 80)
+        )
+        all_fields[FIELD_ROCKET] = self._str(
+            FIELD_ROCKET, _truncate(launch.rocket_full_name or launch.rocket_name, 80)
+        )
+        all_fields[FIELD_PROVIDER] = self._str(
+            FIELD_PROVIDER, _truncate(launch.launch_provider, 60)
+        )
+        all_fields[FIELD_STATUS] = self._str(
+            FIELD_STATUS, _truncate(self._status_line(launch), 50)
+        )
+        all_fields[FIELD_COUNTDOWN] = self._str(FIELD_COUNTDOWN, countdown_str)
+        all_fields[FIELD_WINDOW] = self._str(FIELD_WINDOW, _format_window(launch))
+        all_fields[FIELD_SITE] = self._str(
+            FIELD_SITE, _truncate(launch.launch_pad or launch.launch_site, 60)
+        )
+        all_fields[FIELD_LOCATION] = self._str(
+            FIELD_LOCATION, _truncate(launch.launch_location, 60)
+        )
+        all_fields[FIELD_COUNTRY] = self._str(
+            FIELD_COUNTRY, _truncate(launch.country, 30)
+        )
+        all_fields[FIELD_ORBIT] = self._str(
+            FIELD_ORBIT, _truncate(launch.orbit or launch.destination or "—", 40)
+        )
+        all_fields[FIELD_CREW] = self._str(
+            FIELD_CREW, _truncate(launch.crew_summary(), 100)
+        )
+        all_fields[FIELD_TYPE] = self._str(
+            FIELD_TYPE, _truncate(launch.mission_type or "—", 40)
+        )
+        all_fields[FIELD_PROBABILITY] = self._num(
+            FIELD_PROBABILITY, self._probability(launch)
+        )
+        all_fields[FIELD_IMAGE] = self._image_field(image_info)
 
-        logger.warning("All providers failed to return a valid launch")
-        return None
+        # Honour the configured field order; ignore unknowns so adding a
+        # field in the editor without a matching constant doesn't break us.
+        ordered: list[dict[str, Any]] = []
+        for name in self.field_order:
+            if name in all_fields:
+                ordered.append(all_fields[name])
 
-    def _ordered_providers(self) -> tuple[LaunchProvider, list[LaunchProvider]]:
-        """Return (preferred, all) based on config.preferred_source."""
-        preferred: LaunchProvider | None = None
-        all_providers = list(self.providers)
-        for p in all_providers:
-            if p.name == self.config.preferred_source:
-                preferred = p
-                break
-        if preferred is None and all_providers:
-            preferred = all_providers[0]
-        return preferred, all_providers  # type: ignore[return-value]
+        return {"identities": [ordered]}
+
+    # ------------------------------------------------------------------ #
+    # Field helpers                                                      #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _pick_next_valid(launches: list[Launch]) -> Launch | None:
-        """Pick the earliest launch whose NET is still in the future.
+    def _str(name: str, value: str) -> dict[str, Any]:
+        return {"name": name, "type": TYPE_STRING, "value": value}
 
-        A launch with status "Success" or a failreason set is treated as
-        completed and skipped. A "Hold" status with a future timestamp is
-        still useful.
+    @staticmethod
+    def _num(name: str, value: int | float | None) -> dict[str, Any]:
+        if value is None:
+            value = 0
+        return {"name": name, "type": TYPE_NUMBER, "value": int(value)}
+
+    @staticmethod
+    def _image_field(image_info: dict[str, Any] | None) -> dict[str, Any]:
+        """Build a ``type: 3`` image field.
+
+        Order of preference:
+            1. ``image_info["cdn_url"]``  — a Discord-hosted https URL
+            2. ``image_info["https_url"]`` — any other https URL
+            3. empty string (no image)
         """
-        now = datetime.now(timezone.utc)
-        valid: list[tuple[datetime, Launch]] = []
-        for l in launches:
-            net_str = l.launch_timestamp_utc
-            if not net_str:
-                continue
-            try:
-                net = datetime.fromisoformat(net_str.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if net < now:
-                continue
-            if l.failreason:
-                continue
-            if l.launch_status and l.launch_status.lower() in {
-                "launch was a success",
-                "launch failure",
-                "partial failure",
-            }:
-                continue
-            valid.append((net, l))
-        if not valid:
+        url = ""
+        if image_info:
+            url = (
+                image_info.get("cdn_url")
+                or image_info.get("https_url")
+                or ""
+            )
+            # Discord requires https:// for image fields
+            if url and not url.lower().startswith("https://"):
+                url = ""
+        return {
+            "name": FIELD_IMAGE,
+            "type": TYPE_IMAGE,
+            "value": {"url": url},
+        }
+
+    @staticmethod
+    def _status_line(launch: Launch) -> str:
+        if launch.failreason:
+            return "Scrubbed"
+        if launch.hold_reason:
+            return f"Hold: {launch.hold_reason[:30]}"
+        if launch.launch_status:
+            return launch.launch_status
+        return "Scheduled"
+
+    @staticmethod
+    def _probability(launch: Launch) -> int | None:
+        if launch.launch_probability is None:
             return None
-        valid.sort(key=lambda pair: pair[0])
-        return valid[0][1]
-
-    # ------------------------------------------------------------------ #
-    # Logging                                                             #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _summarise(launch: Launch, image_info: dict[str, Any] | None) -> None:
-        img = image_info.get("source", "—") if image_info else "—"
-        cdn = " (uploaded)" if image_info and image_info.get("cdn_url") else ""
-        logger.info(
-            "Updated widget: %s | rocket=%s | provider=%s | status=%s | image=%s%s",
-            launch.mission_name,
-            launch.rocket_name,
-            launch.launch_provider,
-            launch.launch_status or "Scheduled",
-            img,
-            cdn,
-        )
-
-
-# ---------------------------------------------------------------------- #
-# Factory                                                                 #
-# ---------------------------------------------------------------------- #
-
-
-def build_default_orchestrator(config: AppConfig) -> WidgetOrchestrator:
-    """Build a default orchestrator with sensible production wiring."""
-    http = HttpClient(
-        timeout=config.http_timeout_seconds,
-        retries=config.http_retries,
-        backoff_factor=config.http_backoff_factor,
-    )
-
-    from ..utils.cache import ImageCache
-    image_cache = ImageCache("cache/images", default_ttl=config.image_cache_ttl_seconds)
-
-    image_service = ImageService(
-        http=http,
-        cache=image_cache,
-        fallback_path=config.fallback_image_path,
-        priority=config.image_priority,
-    )
-    payload_builder = PayloadBuilder(image_priority=config.image_priority)
-    updater = DiscordUpdater(
-        http=http,
-        app_id=config.discord_app_id,
-        user_id=config.discord_user_id,
-        bot_token=config.discord_bot_token,
-        dry_run=config.dry_run,
-        state_file=config.state_file,
-    )
-
-    providers: list[LaunchProvider] = [
-        LaunchLibrary2Provider(http=http),
-        SpaceXProvider(http=http),
-    ]
-
-    image_uploader: ImageUploader | None = None
-    target_channel = os.environ.get("DISCORD_TARGET_CHANNEL_ID", "").strip()
-    if target_channel and config.discord_bot_token and not config.dry_run:
-        image_uploader = ImageUploader(
-            bot_token=config.discord_bot_token,
-            channel_id=target_channel,
-        )
-        logger.info("Image uploader enabled → channel %s", target_channel)
-
-    return WidgetOrchestrator(
-        config=config,
-        http=http,
-        image_service=image_service,
-        payload_builder=payload_builder,
-        updater=updater,
-        providers=providers,
-        image_uploader=image_uploader,
-    )
+        try:
+            return int(launch.launch_probability)
+        except (TypeError, ValueError):
+            return None
