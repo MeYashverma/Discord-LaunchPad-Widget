@@ -1,21 +1,24 @@
 """Build the Discord Dynamic Identity JSON payload.
 
-The Discord profile widget has TWO independent sections, addressed by two
-separate entries in the ``identities`` array:
+The Discord profile widget API expects this body shape::
 
-    identities[0]  -> Widget TOP    (Image, Title, Subtitle 1..3)
-    identities[1]  -> Widget BOTTOM (the list of stat fields)
-
-Each entry is an array of fields::
-
-    {"name": "<editor field name>", "type": 1|2|3, "value": ...}
+    {
+      "username": "<any string>",
+      "data": {
+        "dynamic": [
+          { "type": 1, "name": "field_name", "value": "..." },
+          { "type": 2, "name": "field_name", "value": 42 },
+          { "type": 3, "name": "field_name", "value": { "url": "https://..." } }
+        ]
+      }
+    }
 
 Where:
     type 1 = text    -> value is a string
     type 2 = number  -> value is a number
     type 3 = image   -> value is {"url": "https://..."}
 
-The names must match the Data Field names in the Discord widget editor
+Field names must match the Data Field names in the Discord widget editor
 EXACTLY (case-sensitive, including spaces and capitalisation).
 """
 
@@ -142,7 +145,17 @@ class PayloadBuilder:
         image_info: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Return ``{"identities": [top_fields, bottom_fields]}``."""
+        """Return the full body for the Discord PATCH endpoint.
+
+        Shape::
+
+            {
+              "username": "LaunchPad",
+              "data": {
+                "dynamic": [<all field dicts in one flat list>]
+              }
+            }
+        """
         now = now or datetime.now(timezone.utc)
 
         net = _parse_iso(launch.launch_timestamp_utc)
@@ -151,9 +164,16 @@ class PayloadBuilder:
             seconds_left = max(int((net - now).total_seconds()), 0)
         countdown_str = _format_countdown(seconds_left)
 
-        top = self._build_top(launch, image_info, countdown_str)
-        bottom = self._build_bottom(launch, countdown_str, image_info)
-        return {"identities": [top, bottom]}
+        fields: list[dict[str, Any]] = []
+        fields.extend(self._build_top(launch, image_info, countdown_str))
+        fields.extend(self._build_bottom(launch, countdown_str, image_info))
+
+        return {
+            "username": "LaunchPad",
+            "data": {
+                "dynamic": fields,
+            },
+        }
 
     # ------------------------------------------------------------------ #
     # Top (Image / Title / Subtitle 1-3)                                  #
