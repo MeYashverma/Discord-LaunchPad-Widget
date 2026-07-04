@@ -33,25 +33,25 @@ image asset used to populate the widget.
 
 ## 📊 What the widget displays
 
-For the next valid launch the widget exposes:
+For the next valid launch the widget exposes 14 fields (matching the
+exact layout of the widget editor):
 
-| Field name      | Type    | Example                                |
-| --------------- | ------- | -------------------------------------- |
-| `mission`       | string  | `Crew-12 Mission`                      |
-| `rocket`        | string  | `Falcon 9 Block 5`                     |
-| `provider`      | string  | `SpaceX`                               |
-| `status`        | string  | `Go` / `Hold: Weather` / `TBD`         |
-| `countdown`     | string  | `T-04d 12:35:21`                       |
-| `window`        | string  | `2026-07-08 14:30 UTC → 18:30 UTC`     |
-| `site`          | string  | `Space Launch Complex 39A`             |
-| `location`      | string  | `Cape Canaveral, FL`                   |
-| `country`       | string  | `USA`                                  |
-| `orbit`         | string  | `Low Earth Orbit`                      |
-| `crew`          | string  | `J. Smith, A. Patel +2`                |
-| `type`          | string  | `Human Spaceflight`                    |
-| `probability`   | number  | `85`                                   |
-| `seconds_to_launch` | number | `385521`                             |
-| `image`         | string  | (hosted image URL)                     |
+| # | Field name      | Type    | Example                                |
+| - | --------------- | ------- | -------------------------------------- |
+| 1 | `mission`       | text    | `Falcon 9 Block 5 | Starlink Group 10-50` |
+| 2 | `rocket`        | text    | `Falcon 9 Block 5`                     |
+| 3 | `provider`      | text    | `SpaceX`                               |
+| 4 | `status`        | text    | `Go for Launch` / `Hold: Weather`      |
+| 5 | `countdown`     | text    | `T-04d 12:35:21`                       |
+| 6 | `window`        | text    | `2026-07-08 14:30 UTC → 18:30 UTC`     |
+| 7 | `site`          | text    | `Space Launch Complex 40`              |
+| 8 | `location`      | text    | `Cape Canaveral SFS, FL, USA`          |
+| 9 | `country`       | text    | `United States of America`             |
+| 10| `orbit`         | text    | `Low Earth Orbit`                      |
+| 11| `crew`          | text    | `Uncrewed` (or `J. Smith, A. Patel +2`)|
+| 12| `type`          | text    | `Communications` / `Human Spaceflight` |
+| 13| `probability`   | number  | `85`                                   |
+| 14| `image`         | image   | (Discord CDN URL)                      |
 
 The set of field names must match the **Data Field** names you create in
 the Discord widget editor — see [`SETUP.md`](docs/SETUP.md).
