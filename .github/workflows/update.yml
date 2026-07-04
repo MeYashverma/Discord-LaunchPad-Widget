@@ -46,7 +46,7 @@ jobs:
           DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          # Optional: a channel the bot can write to. When set, the
+          # Optional: a channel the bot can write to.  When set, the
           # orchestrator will upload each picked image to this channel
           # first and use the resulting Discord CDN URL in the widget.
           # Otherwise the image field is left empty (Discord will not
@@ -62,14 +62,8 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN }}
         run: python widget.py
 
-      # Self-dispatch ONLY on clean exit, not on a crash.
-      # The widget daemon returns 0 when its runtime budget is exhausted
-      # or it receives SIGTERM/SIGINT. Any non-zero exit means the daemon
-      # crashed — in that case the 6h ``schedule:`` cron above is the
-      # fallback so the widget never goes stale, but we don't queue a
-      # tight follow-up run that would also crash.
       - name: Trigger next run
-        if: success()
+        if: always()
         run: |
           echo "Triggering next workflow run..."
           curl -sS -f -X POST \
