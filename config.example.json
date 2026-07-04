@@ -2,6 +2,7 @@
   "discord_app_id": "",
   "discord_user_id": "",
   "discord_bot_token": "",
+  "discord_target_channel_id": "",
 
   "preferred_source": "launch_library",
 
@@ -27,8 +28,5 @@
   "dry_run": false,
   "log_file": "widget.log",
   "log_level": "INFO",
-  "state_file": "last_payload.json",
-
-  "nasa_api_key": "DEMO_KEY",
-  "show_iss_bonus": false
+  "state_file": "last_payload.json"
 }
