@@ -1,13 +1,4 @@
-"""Lightweight on-disk TTL cache for API and image data.
-
-We deliberately avoid extra dependencies. A single JSON file in the working
-directory is used to store the cached value plus an ``expires_at`` timestamp.
-The image cache is separate: image blobs are stored on disk as files and
-their metadata is kept in a JSON index.
-
-The cache is best-effort — corruption or IO errors are logged and treated as
-cache misses so the widget still runs.
-"""
+"""File-backed TTL caches for API data and downloaded images."""
 
 from __future__ import annotations
 
@@ -22,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class TTLCache:
-    """File-backed key/value cache with per-key TTLs."""
+    """Per-key TTL cache, persisted to a JSON file."""
 
     def __init__(self, path: str | os.PathLike[str], default_ttl: float = 120.0) -> None:
         self.path = Path(path)
@@ -57,7 +48,6 @@ class TTLCache:
         if not entry:
             return None
         if float(entry.get("expires_at", 0)) < time.time():
-            # expired
             self._data.pop(key, None)
             return None
         return entry.get("value")
@@ -65,10 +55,7 @@ class TTLCache:
     def set(self, key: str, value: Any, ttl: float | None = None) -> None:
         self._load()
         ttl = ttl if ttl is not None else self.default_ttl
-        self._data[key] = {
-            "value": value,
-            "expires_at": time.time() + ttl,
-        }
+        self._data[key] = {"value": value, "expires_at": time.time() + ttl}
         self._persist()
 
     def clear(self) -> None:
@@ -77,7 +64,7 @@ class TTLCache:
 
 
 class ImageCache:
-    """On-disk cache for downloaded images, indexed by a content hash."""
+    """On-disk image cache, indexed by content hash."""
 
     def __init__(self, directory: str | os.PathLike[str], default_ttl: float = 86400.0) -> None:
         self.directory = Path(directory)
@@ -96,7 +83,7 @@ class ImageCache:
         try:
             self._index = json.loads(self.index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Image cache index unreadable, starting empty: %s", exc)
+            logger.warning("Image cache index unreadable: %s", exc)
             self._index = {}
 
     def _persist(self) -> None:
@@ -115,7 +102,6 @@ class ImageCache:
         return float(entry.get("expires_at", 0)) >= time.time()
 
     def path_for(self, key: str) -> Path:
-        # Keys are sanitised to filename-safe form
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in key)
         return self.directory / f"{safe}.bin"
 
