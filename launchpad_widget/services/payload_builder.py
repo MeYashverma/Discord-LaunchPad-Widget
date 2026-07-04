@@ -1,25 +1,28 @@
 """Build the Discord Dynamic Identity JSON payload.
 
-Discord identity fields have a ``type`` of:
+The Discord profile widget has TWO independent sections, addressed by two
+separate entries in the ``identities`` array:
 
-    1 = string (text)
-    2 = number
-    3 = image (nested ``value.url``)
+    identities[0]  -> Widget TOP  (Image, Title, Subtitle 1..3)
+    identities[1]  -> Widget BOTTOM (the list of stats)
 
-The exact list of field names the widget displays is configured to match
-the Data Fields in the Discord widget editor.  Keep this list in sync with
-``docs/FIELDS.md``.
+Each entry is an array of fields.  A field is::
 
-Reference (PATCH endpoint body shape):
+    {"name": "<editor field name>", "type": 1|2|3, "value": <see below>}
 
-    PATCH /applications/{APP_ID}/users/{USER_ID}/identities/0/profile
-    Body: {"identities": [[ {"name": "...", "type": 1|2|3, "value": ...}, ... ]]}
+Where:
+
+    type 1 = text        -> value is a string
+    type 2 = number      -> value is a number
+    type 3 = image       -> value is {"url": "https://..."}
+
+The names must match the Data Field names in the Discord widget editor
+exactly (case-sensitive, including spaces and capitalisation).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,9 +32,15 @@ from ..models import Launch
 logger = logging.getLogger(__name__)
 
 
-# Field name constants — these MUST match the Data Field names configured
-# in the Discord widget editor.  Keep them short, Discord truncates long
-# values.
+# --- Widget TOP field names (must match editor exactly) ---------------- #
+TOP_IMAGE = "Image"          # type 3
+TOP_TITLE = "Title"          # type 1
+TOP_SUBTITLE_1 = "Subtitle 1"  # type 1
+TOP_SUBTITLE_2 = "Subtitle 2"  # type 1
+TOP_SUBTITLE_3 = "Subtitle 3"  # type 1
+
+
+# --- Widget BOTTOM field names (must match editor exactly) ------------- #
 FIELD_MISSION = "mission"
 FIELD_ROCKET = "rocket"
 FIELD_PROVIDER = "provider"
@@ -47,38 +56,18 @@ FIELD_TYPE = "type"
 FIELD_PROBABILITY = "probability"
 FIELD_IMAGE = "image"
 
-# Discord dynamic-identity type codes
+
+# --- Discord type codes ------------------------------------------------ #
 TYPE_STRING = 1
 TYPE_NUMBER = 2
 TYPE_IMAGE = 3
 
 
-# Discord's text field limit is generous but not infinite; 512 chars is a
-# safe upper bound for a single line of widget text.
+# Discord's text field limit is generous but not infinite.
 MAX_TEXT_LEN = 480
 
 
-# The set of fields the widget editor defines.  The daemon always sends
-# exactly these (in this order) so that Discord binds every slot.
-DEFAULT_FIELD_ORDER: list[str] = [
-    FIELD_MISSION,
-    FIELD_ROCKET,
-    FIELD_PROVIDER,
-    FIELD_STATUS,
-    FIELD_COUNTDOWN,
-    FIELD_WINDOW,
-    FIELD_SITE,
-    FIELD_LOCATION,
-    FIELD_COUNTRY,
-    FIELD_ORBIT,
-    FIELD_CREW,
-    FIELD_TYPE,
-    FIELD_PROBABILITY,
-    FIELD_IMAGE,
-]
-
-
-def _truncate(text: str, limit: int = MAX_TEXT_LEN) -> str:
+def _truncate(text: Any, limit: int = MAX_TEXT_LEN) -> str:
     if text is None:
         return ""
     if not isinstance(text, str):
@@ -93,7 +82,6 @@ def _parse_iso(ts: str) -> datetime | None:
     if not ts:
         return None
     try:
-        # 'Z' suffix is not understood by fromisoformat in <3.11
         cleaned = ts.replace("Z", "+00:00")
         return datetime.fromisoformat(cleaned)
     except ValueError:
@@ -101,7 +89,7 @@ def _parse_iso(ts: str) -> datetime | None:
 
 
 def _format_countdown(seconds: int) -> str:
-    """Format a non-negative number of seconds as ``Dd HH:MM:SS``."""
+    """``T-Dd HH:MM:SS`` or ``T-HH:MM:SS``."""
     if seconds < 0:
         seconds = 0
     days, rem = divmod(seconds, 86400)
@@ -128,6 +116,20 @@ def _format_window(launch: Launch) -> str:
     return _truncate(pretty, 80)
 
 
+def _image_url(image_info: dict[str, Any] | None) -> str:
+    """Best Discord-CDN URL for the image field, or ''."""
+    if not image_info:
+        return ""
+    url = (
+        image_info.get("cdn_url")
+        or image_info.get("https_url")
+        or ""
+    )
+    if url and not url.lower().startswith("https://"):
+        return ""
+    return url
+
+
 class PayloadBuilder:
     """Builds the JSON payload for the Discord PATCH endpoint."""
 
@@ -135,13 +137,10 @@ class PayloadBuilder:
         self,
         *,
         image_priority: list[str] | None = None,
-        field_order: list[str] | None = None,
     ) -> None:
         self.image_priority = image_priority or [
             "rocket", "mission_patch", "launch_artwork", "launchpad"
         ]
-        # Override the default field set if the user wants a subset.
-        self.field_order = field_order or list(DEFAULT_FIELD_ORDER)
 
     # ------------------------------------------------------------------ #
     # Public API                                                          #
@@ -154,14 +153,8 @@ class PayloadBuilder:
         image_info: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Return the ``identities`` payload to send to Discord.
-
-        Discord's PATCH endpoint expects the body to be ``{"identities": [...]}``,
-        where each identity is a list of field dicts with ``name`` and
-        ``value`` keys plus a ``type`` of 1 (string), 2 (number) or 3 (image).
-        """
+        """Return ``{"identities": [top_fields, bottom_fields]}``."""
         now = now or datetime.now(timezone.utc)
-        all_fields: dict[str, dict[str, Any]] = {}
 
         net = _parse_iso(launch.launch_timestamp_utc)
         seconds_left = 0
@@ -169,52 +162,92 @@ class PayloadBuilder:
             seconds_left = max(int((net - now).total_seconds()), 0)
         countdown_str = _format_countdown(seconds_left)
 
-        # --- Build every field up-front so order is deterministic --- #
-        all_fields[FIELD_MISSION] = self._str(
-            FIELD_MISSION, _truncate(launch.mission_name, 80)
-        )
-        all_fields[FIELD_ROCKET] = self._str(
-            FIELD_ROCKET, _truncate(launch.rocket_full_name or launch.rocket_name, 80)
-        )
-        all_fields[FIELD_PROVIDER] = self._str(
-            FIELD_PROVIDER, _truncate(launch.launch_provider, 60)
-        )
-        all_fields[FIELD_STATUS] = self._str(
-            FIELD_STATUS, _truncate(self._status_line(launch), 50)
-        )
-        all_fields[FIELD_COUNTDOWN] = self._str(FIELD_COUNTDOWN, countdown_str)
-        all_fields[FIELD_WINDOW] = self._str(FIELD_WINDOW, _format_window(launch))
-        all_fields[FIELD_SITE] = self._str(
-            FIELD_SITE, _truncate(launch.launch_pad or launch.launch_site, 60)
-        )
-        all_fields[FIELD_LOCATION] = self._str(
-            FIELD_LOCATION, _truncate(launch.launch_location, 60)
-        )
-        all_fields[FIELD_COUNTRY] = self._str(
-            FIELD_COUNTRY, _truncate(launch.country, 30)
-        )
-        all_fields[FIELD_ORBIT] = self._str(
-            FIELD_ORBIT, _truncate(launch.orbit or launch.destination or "—", 40)
-        )
-        all_fields[FIELD_CREW] = self._str(
-            FIELD_CREW, _truncate(launch.crew_summary(), 100)
-        )
-        all_fields[FIELD_TYPE] = self._str(
-            FIELD_TYPE, _truncate(launch.mission_type or "—", 40)
-        )
-        all_fields[FIELD_PROBABILITY] = self._num(
-            FIELD_PROBABILITY, self._probability(launch)
-        )
-        all_fields[FIELD_IMAGE] = self._image_field(image_info)
+        top = self._build_top(launch, image_info, countdown_str)
+        bottom = self._build_bottom(launch, countdown_str, image_info)
+        return {"identities": [top, bottom]}
 
-        # Honour the configured field order; ignore unknowns so adding a
-        # field in the editor without a matching constant doesn't break us.
-        ordered: list[dict[str, Any]] = []
-        for name in self.field_order:
-            if name in all_fields:
-                ordered.append(all_fields[name])
+    # ------------------------------------------------------------------ #
+    # Top (Image / Title / Subtitle 1-3)                                  #
+    # ------------------------------------------------------------------ #
 
-        return {"identities": [ordered]}
+    def _build_top(
+        self,
+        launch: Launch,
+        image_info: dict[str, Any] | None,
+        countdown_str: str,
+    ) -> list[dict[str, Any]]:
+        rocket = launch.rocket_full_name or launch.rocket_name or "Unknown Rocket"
+        provider = launch.launch_provider or "Unknown Provider"
+        site = launch.launch_pad or launch.launch_site or "Unknown Site"
+        location = launch.launch_location or ""
+        status = self._status_line(launch)
+
+        # Subtitle 1: rocket + provider
+        sub1 = f"{rocket} \u00b7 {provider}"
+        # Subtitle 2: countdown
+        sub2 = countdown_str
+        # Subtitle 3: site / location
+        sub3 = f"{site}" + (f" \u00b7 {location}" if location else "")
+
+        return [
+            {
+                "name": TOP_IMAGE,
+                "type": TYPE_IMAGE,
+                "value": {"url": _image_url(image_info)},
+            },
+            {
+                "name": TOP_TITLE,
+                "type": TYPE_STRING,
+                "value": _truncate(launch.mission_name or "Unknown Mission", 80),
+            },
+            {
+                "name": TOP_SUBTITLE_1,
+                "type": TYPE_STRING,
+                "value": _truncate(sub1, 100),
+            },
+            {
+                "name": TOP_SUBTITLE_2,
+                "type": TYPE_STRING,
+                "value": _truncate(sub2, 50),
+            },
+            {
+                "name": TOP_SUBTITLE_3,
+                "type": TYPE_STRING,
+                "value": _truncate(sub3, 100),
+            },
+        ]
+
+    # ------------------------------------------------------------------ #
+    # Bottom (stat fields)                                                #
+    # ------------------------------------------------------------------ #
+
+    def _build_bottom(
+        self,
+        launch: Launch,
+        countdown_str: str,
+        image_info: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        fields: list[dict[str, Any]] = [
+            self._str(FIELD_MISSION, _truncate(launch.mission_name, 80)),
+            self._str(FIELD_ROCKET, _truncate(launch.rocket_full_name or launch.rocket_name, 80)),
+            self._str(FIELD_PROVIDER, _truncate(launch.launch_provider, 60)),
+            self._str(FIELD_STATUS, _truncate(self._status_line(launch), 50)),
+            self._str(FIELD_COUNTDOWN, countdown_str),
+            self._str(FIELD_WINDOW, _format_window(launch)),
+            self._str(FIELD_SITE, _truncate(launch.launch_pad or launch.launch_site, 60)),
+            self._str(FIELD_LOCATION, _truncate(launch.launch_location, 60)),
+            self._str(FIELD_COUNTRY, _truncate(launch.country, 30)),
+            self._str(FIELD_ORBIT, _truncate(launch.orbit or launch.destination or "\u2014", 40)),
+            self._str(FIELD_CREW, _truncate(launch.crew_summary(), 100)),
+            self._str(FIELD_TYPE, _truncate(launch.mission_type or "\u2014", 40)),
+            self._num(FIELD_PROBABILITY, self._probability(launch)),
+            {
+                "name": FIELD_IMAGE,
+                "type": TYPE_IMAGE,
+                "value": {"url": _image_url(image_info)},
+            },
+        ]
+        return fields
 
     # ------------------------------------------------------------------ #
     # Field helpers                                                      #
@@ -229,31 +262,6 @@ class PayloadBuilder:
         if value is None:
             value = 0
         return {"name": name, "type": TYPE_NUMBER, "value": int(value)}
-
-    @staticmethod
-    def _image_field(image_info: dict[str, Any] | None) -> dict[str, Any]:
-        """Build a ``type: 3`` image field.
-
-        Order of preference:
-            1. ``image_info["cdn_url"]``  — a Discord-hosted https URL
-            2. ``image_info["https_url"]`` — any other https URL
-            3. empty string (no image)
-        """
-        url = ""
-        if image_info:
-            url = (
-                image_info.get("cdn_url")
-                or image_info.get("https_url")
-                or ""
-            )
-            # Discord requires https:// for image fields
-            if url and not url.lower().startswith("https://"):
-                url = ""
-        return {
-            "name": FIELD_IMAGE,
-            "type": TYPE_IMAGE,
-            "value": {"url": url},
-        }
 
     @staticmethod
     def _status_line(launch: Launch) -> str:
