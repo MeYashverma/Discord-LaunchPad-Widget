@@ -66,22 +66,33 @@ Both are free, no auth, plenty of rate limit for this use case.
 ## Image processing (D.W.I.F)
 
 The widget image is processed through [D.W.I.F](https://github.com/AjaxFNC-YT/D.W.I.F)
-(Discord Widget Image Fixer) before being uploaded. D.W.I.F adds a transparent
-top strip + rounded top-right corner so the image clips correctly inside
-Discord's widget rounded rectangle.
+(Discord Widget Image Fixer) before being uploaded. The full pipeline:
+
+1. **Download** the best available launch image (rocket artwork → mission
+   patch → launch artwork → launchpad image) to a local cache.
+2. **Center-crop + resize** the image to a 1300×1300 square PNG using
+   Pillow. This makes the artwork fill Discord's square widget canvas
+   instead of sitting tiny in the middle of a wide frame.
+3. **D.W.I.F** adds a transparent top strip (~57px at 1300x1300) and a
+   rounded top-right corner so the image clips correctly into Discord's
+   widget rounded rectangle.
+4. **Upload** the styled PNG to your Discord channel via the bot.
+5. **PATCH** the widget with the resulting `cdn.discordapp.com` URL.
 
 The daemon handles the D.W.I.F install automatically on first run:
 
 1. Detects Node.js (set up in the workflow via `actions/setup-node`)
 2. Clones D.W.I.F into `./dwif/`
 3. Runs `npm install --omit=dev` to install dependencies
-4. Calls D.W.I.F's `process-image.mjs` on every picked launch image
-5. Uploads the styled image to your Discord channel
-6. Uses the resulting `cdn.discordapp.com` URL in the widget payload
+4. Runs the full D.W.I.F pipeline on every picked launch image
 
 If Node.js or D.W.I.F are unavailable, the daemon gracefully falls back
-to uploading the unprocessed image (still works, just without the rounded
-corner / top strip).
+to uploading the raw image (still works, just without the rounded
+corner / top strip and without the square pre-resize).
+
+**Output size:** the daemon produces 1300×1300 + strip = ~1300×1357 px
+PNG images.  Discord scales them to fit the 650×650 base widget canvas,
+which is 2x resolution — crisp on all displays.
 
 ---
 

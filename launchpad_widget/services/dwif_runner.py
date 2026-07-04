@@ -91,30 +91,69 @@ def ensure_dwif_installed() -> bool:
     return is_available()
 
 
+# Target output dimensions for the widget image.  Discord widgets render
+# the image at 650x650 base resolution; we go to 2x (1300x1300) so the
+# result is crisp on high-DPI displays.  The D.W.I.F rounded-corner /
+# top-strip sizes are auto-calculated from these dimensions.
+WIDGET_IMAGE_SIZE = 1300
+
+
+def _prepare_square_image(
+    input_path: Path,
+    size: int = WIDGET_IMAGE_SIZE,
+) -> Path | None:
+    """Resize ``input_path`` to a square ``size x size`` PNG.
+
+    Uses Pillow's cover-fit (center-crop to maintain aspect, then resize).
+    The result is a square PNG saved next to the original with a ``-square``
+    suffix.  Returns the new path, or None on failure.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        logger.warning("Pillow not installed; cannot pre-resize for D.W.I.F")
+        return None
+    try:
+        with Image.open(input_path) as im:
+            im = im.convert("RGBA")
+            fitted = ImageOps.fit(im, (size, size), method=Image.LANCZOS, centering=(0.5, 0.5))
+            out = input_path.with_name(f"{input_path.stem}-square.png")
+            fitted.save(out, format="PNG", optimize=True)
+            return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to pre-resize image: %s", exc)
+        return None
+
+
 def process_image(
     input_path: str | Path,
     output_path: str | Path | None = None,
     *,
     top_strip: int | None = None,
     radius: int | None = None,
+    target_size: int = WIDGET_IMAGE_SIZE,
     timeout: float = 60.0,
 ) -> Path | None:
     """Run D.W.I.F on ``input_path`` and return the path to the processed image.
+
+    The input image is first center-cropped to a square (``target_size`` x
+    ``target_size``) and saved as a PNG, so D.W.I.F's auto-sizing works
+    correctly and the final widget image fills the available canvas.  D.W.I.F
+    then adds the transparent top strip + rounded top-right corner.
 
     Parameters
     ----------
     input_path:
         Local path to the image to process.
     output_path:
-        Where to write the result. Defaults to ``<input>-dwif.png`` next to
-        the input file.
+        Where to write the final result.  Defaults to ``<input>-dwif.png``
+        next to the input file.
     top_strip, radius:
         Optional overrides for D.W.I.F's auto-computed values. ``None`` means
         "let D.W.I.F decide".
-
-    Returns
-    -------
-    The output path on success, or ``None`` if D.W.I.F failed.
+    target_size:
+        Side length of the square output in pixels.  Defaults to
+        ``WIDGET_IMAGE_SIZE`` (1300).
     """
     if not is_available():
         if not ensure_dwif_installed():
@@ -124,41 +163,39 @@ def process_image(
     input_p = Path(input_path).resolve()
     if not input_p.is_file():
         return None
-    # D.W.I.F only accepts .png, .webp, .gif outputs.  If our cached file
-    # is ``.bin`` we still pass it to D.W.I.F (it sniffs the actual format
-    # from the bytes for the input) but force the output extension to .png.
+
+    # Step 1: convert the input to a square PNG of the target size.  This
+    # is required because Discord widgets render the image at 1:1 aspect
+    # and the original launch artwork is usually wide-aspect; if we don't
+    # crop, the rocket ends up tiny in the middle of a wide empty frame.
+    square_input = _prepare_square_image(input_p, size=target_size)
+    if square_input is None or not square_input.is_file():
+        logger.debug("Square pre-resize failed; falling back to raw input")
+        square_input = input_p
+        if square_input.suffix.lower() not in (".png", ".webp", ".gif"):
+            # D.W.I.F needs a recognised extension on the input.
+            renamed = square_input.with_suffix(".png")
+            if not renamed.exists():
+                try:
+                    renamed.write_bytes(square_input.read_bytes())
+                except OSError as exc:
+                    logger.warning("Failed to make D.W.I.F-readable copy: %s", exc)
+                    return None
+            square_input = renamed
+
+    # Step 2: D.W.I.F runs on the square input and writes a styled output.
     if output_path is None:
         out_basename = f"{input_p.stem}-dwif.png"
-        out_dwif_dir = DWIF_DIR / "output"
-        out_dwif_dir.mkdir(parents=True, exist_ok=True)
-        dwif_output = out_dwif_dir / out_basename
-        final_output = input_p.with_name(out_basename)
     else:
-        final_output = Path(output_path).resolve()
-        # Ensure final output has a supported extension
-        if final_output.suffix.lower() not in (".png", ".webp", ".gif"):
-            final_output = final_output.with_suffix(".png")
-        dwif_output = DWIF_DIR / "output" / final_output.name
+        out_basename = Path(output_path).name
+    out_dwif_dir = DWIF_DIR / "output"
+    out_dwif_dir.mkdir(parents=True, exist_ok=True)
+    dwif_output = out_dwif_dir / out_basename
+    final_output = input_p.with_name(out_basename)
     final_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # D.W.I.F accepts absolute input paths directly.  We rename the file
-    # to .png (if needed) so D.W.I.F's format sniffer picks the right
-    # encoder.  We work on a temp copy next to the original.
-    if input_p.suffix.lower() not in (".png", ".webp", ".gif"):
-        renamed = input_p.with_suffix(".png")
-        if not renamed.exists():
-            try:
-                renamed.write_bytes(input_p.read_bytes())
-            except OSError as exc:
-                logger.warning("Failed to make D.W.I.F-readable copy: %s", exc)
-                return None
-        dwif_input = renamed
-    else:
-        dwif_input = input_p
-
     # D.W.I.F's argv: process-image.mjs <inputPath> <outputName> <topStrip> <radius> <fastAnimated>
-    # ``outputName`` is a filename (relative to OUTPUT_DIR), not a full path.
-    cmd = ["node", str(DWIF_SCRIPT), str(dwif_input), dwif_output.name]
+    cmd = ["node", str(DWIF_SCRIPT), str(square_input), dwif_output.name]
     if top_strip is not None:
         cmd.append(str(top_strip))
     else:
@@ -167,7 +204,6 @@ def process_image(
         cmd.append(str(radius))
     else:
         cmd.append("")
-    # fastAnimated default
     cmd.append("true")
 
     try:
