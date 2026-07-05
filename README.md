@@ -108,7 +108,7 @@ which is 2x resolution — crisp on all displays.
 
 The widget editor has two tabs: **Widget Top** and **Widget Bottom**.
 
-**Widget Top → Content** — add 5 fields with these exact names:
+**Widget Top → Content** — add 5 fields with these exact names (or customize however you want doesn't really matter):
 | Name | Type |
 | --- | --- |
 | `Image` | Image |
@@ -117,7 +117,7 @@ The widget editor has two tabs: **Widget Top** and **Widget Bottom**.
 | `Subtitle 2` | Text |
 | `Subtitle 3` | Text |
 
-**Widget Bottom → Content** — add 14 fields with these exact names:
+**Widget Bottom → Content** — add 14 fields with these exact names (or customize however you want doesn't really matter):
 | Name | Type | Name | Type |
 | --- | --- | --- | --- |
 | `mission` | text | `location` | text |
@@ -212,9 +212,3 @@ launchpad_widget/
 ├── models.py
 └── main.py
 ```
-
----
-
-## License
-
-MIT.
