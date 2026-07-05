@@ -1,105 +1,183 @@
-# Setup — Discord LaunchPad Widget
+# Setup Guide
 
-This is the one-time setup you have to do before the widget can run.
-Total time: ~10 minutes.
+Step-by-step instructions to get the widget running from scratch.
 
-## 1. Create a Discord application
+## Prerequisites
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Click **New Application**, give it any name (e.g. *LaunchPad*).
-3. Open the **Activities** tab in the left sidebar.
-4. Click **Profile Widget → Enable**.
-5. Under **Data Fields**, add one field per row in the table below.
+- A GitHub account
+- A Discord account
+- About 15 minutes
 
-### Data Fields to create
+## Step 1 — Create a Discord Application
 
-Create a field for every row. The **Name** column is what the widget will
-display; the **Value** column is sourced from the corresponding
-identities payload key. Discord does not allow more than ~10 text fields
-plus a couple of numeric/image fields, so pick the subset that matters to
-you — the daemon always sends them all, Discord silently ignores the
-unbound ones.
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Click **New Application** in the top right.
+3. Name it `LaunchPad` (or whatever you like).
+4. Accept the terms of service.
 
-| Name                | Type   | Bound to identities field |
-| ------------------- | ------ | ------------------------- |
-| Mission             | text   | `mission`                 |
-| Rocket              | text   | `rocket`                  |
-| Provider            | text   | `provider`                |
-| Status              | text   | `status`                  |
-| Countdown           | text   | `countdown`               |
-| Window              | text   | `window`                  |
-| Site                | text   | `site`                    |
-| Location            | text   | `location`                |
-| Country             | text   | `country`                 |
-| Orbit               | text   | `orbit`                   |
-| Crew                | text   | `crew`                    |
-| Type                | text   | `type`                    |
-| Probability         | number | `probability`             |
-| Image               | image  | `image`                   |
+You'll land on the **General Information** page. Note down the
+**Application ID** — you'll need it later.
 
-> ⚠️ Field names are case-sensitive and must match the daemon's output
-> *exactly*. If you change a name here, also update `payload_builder.py`.
+## Step 2 — Create the Widget
 
-## 2. Create a bot (or use a user token)
+In the left sidebar of the Developer Portal:
 
-The PATCH endpoint accepts both a `Bot` token and a user account token,
-but `Bot` is the supported path.
+1. Click **Activities** (you may need to scroll down — it's in the
+   settings group).
+2. Look for the **Profile Widget** section and click **Enable**.
 
-1. In the Developer Portal, open **Bot** in the sidebar.
+The widget editor opens. You'll see two tabs: **Widget Top** and
+**Widget Bottom**.
+
+### Configure Widget Top
+
+Click on **Widget Top → Content**. Create 5 fields with these
+**exact** names and types:
+
+| # | Name | Type |
+| - | --- | ---- |
+| 1 | `Image` | Image |
+| 2 | `Title` | Text |
+| 3 | `Subtitle 1` | Text |
+| 4 | `Subtitle 2` | Text |
+| 5 | `Subtitle 3` | Text |
+
+> ⚠️ Field names are case-sensitive. The widget will not bind to fields
+> named `mission` (lowercase) differently from `Mission` (capital M).
+> Always use the exact names from this table.
+
+### Configure Widget Bottom
+
+Click on **Widget Bottom → Content**. Create 14 fields:
+
+| # | Name | Type |
+| - | --- | ---- |
+| 1 | `mission` | Text |
+| 2 | `rocket` | Text |
+| 3 | `provider` | Text |
+| 4 | `status` | Text |
+| 5 | `countdown` | Text |
+| 6 | `window` | Text |
+| 7 | `site` | Text |
+| 8 | `location` | Text |
+| 9 | `country` | Text |
+| 10 | `orbit` | Text |
+| 11 | `crew` | Text |
+| 12 | `type` | Text |
+| 13 | `probability` | Number |
+| 14 | `image` | Image |
+
+Click **Save** in the editor.
+
+## Step 3 — Create a Bot
+
+In the left sidebar:
+
+1. Click **Bot**.
 2. Click **Add Bot → Yes, do it**.
-3. Copy the bot token — this is your `DISCORD_BOT_TOKEN`.
-4. Make sure the **Message Content Intent** is **not** required (the daemon
-   only sends a single PATCH; it doesn't read messages).
+3. Under **Token**, click **Reset Token** → confirm.
+4. **Copy the token** and store it somewhere safe (you'll add it to
+   GitHub Secrets in step 6). You won't be able to see this token
+   again without resetting it.
 
-## 3. Collect IDs
+## Step 4 — Invite the Bot to Your Server
 
-* **Application ID** — from **General Information** in the Developer
-  Portal. This is `DISCORD_APPLICATION_ID`.
-* **User ID** — your own Discord user ID. Enable Developer Mode in
-  Discord → Settings → Advanced → Developer Mode, then right-click your
-  avatar → *Copy User ID*. This is `DISCORD_USER_ID`.
+In the left sidebar:
 
-## 4. Add the secrets to GitHub
+1. Click **OAuth2 → URL Generator**.
+2. Under **Scopes**, check **`bot`**.
+3. Under **Bot Permissions**, check:
+   - View Channels
+   - Send Messages
+   - Attach Files
+   - Read Message History
+4. Scroll down and copy the **Generated URL**.
+5. Paste it into your browser, select your server, click **Authorize**.
+6. Complete the CAPTCHA.
 
-In your fork of this repository:
+The bot will now appear in your server's member list (offline, since
+we don't keep it running locally).
 
-1. Settings → Secrets and variables → Actions → **New repository secret**
-2. Add three secrets:
-   * `DISCORD_APPLICATION_ID`
-   * `DISCORD_USER_ID`
-   * `DISCORD_BOT_TOKEN`
+## Step 5 — Get Your User ID
 
-Optional:
+1. In Discord, click the **⚙️ gear icon** next to your avatar.
+2. Go to **Advanced** → enable **Developer Mode** → close settings.
+3. **Right-click your own avatar** in any chat → **Copy User ID**.
 
-* `NASA_API_KEY` — for higher NASA rate limits.
-* Variables (not secrets, since they're not sensitive):
-  * `PREFERRED_SOURCE` — `launch_library` or `spacex`.
-  * `UPDATE_INTERVAL_SECONDS` — how often to refresh.
-  * `DRY_RUN` — set to `true` to log payloads without PATCHing.
+## Step 6 — Create the Image Upload Channel (Optional)
 
-## 5. First run
+This is needed if you want the `Image` field to display. Without this
+step, the widget's image slot will be empty.
 
-1. Go to the **Actions** tab in your fork.
-2. Select **Update LaunchPad Widget** on the left.
+1. In your Discord server, create a new channel: **`#launchpad-assets`**
+   (private is fine, only you and the bot need access).
+2. Right-click the channel → **Edit Channel** → **Permissions**.
+3. Click **+ Add members or roles** → search for your bot → add it.
+4. Toggle **ON** for the bot: `View Channel`, `Send Messages`, `Attach Files`.
+5. Right-click the channel header → **Copy Channel ID** (you may need
+   to enable Developer Mode first, see Step 5).
+
+## Step 7 — Add Secrets to GitHub
+
+In your fork of the repo:
+
+1. Go to **Settings → Secrets and variables → Actions → Secrets tab**.
+2. Click **New repository secret** for each:
+
+   | Name | Value |
+   | --- | --- |
+   | `DISCORD_APPLICATION_ID` | The Application ID from Step 1 |
+   | `DISCORD_USER_ID` | The User ID from Step 5 |
+   | `DISCORD_BOT_TOKEN` | The Bot token from Step 3 |
+   | `DISCORD_TARGET_CHANNEL_ID` | (Optional) The channel ID from Step 6 |
+
+**Important:** These go in **Secrets**, not Variables. Secrets are
+encrypted; Variables are visible to anyone with read access.
+
+## Step 8 — Run the Workflow
+
+1. Go to the **Actions** tab in your repo.
+2. Click **Update LaunchPad Widget** in the left sidebar.
 3. Click **Run workflow → Run workflow**.
-4. Watch the logs — you should see a `PATCH ok` line within a minute.
 
-Once the first run completes successfully, the workflow self-dispatches
-subsequent runs every time it exits, so the widget stays live
-indefinitely. The `schedule:` cron in `update.yml` is just a safety net.
+The first run will:
+- Install Python dependencies (`requests`, `Pillow`)
+- Start the daemon
+- Fetch the next launch
+- PATCH the widget
 
-## 6. (Optional) Image upload helper
+You should see the widget populate on your Discord profile within a
+minute or two. The daemon will keep running and self-dispatch new
+runs as needed.
 
-If you want a custom image per launch instead of the bundled fallback,
-set up the helper:
+## Troubleshooting
 
-1. Create a private Discord channel the bot can access.
-2. Copy the channel ID — this is `DISCORD_TARGET_CHANNEL_ID`.
-3. Add `DISCORD_TARGET_CHANNEL_ID` as a repository variable (it's not
-   sensitive but tying it to a secret is fine too).
-4. Extend the workflow step that runs the daemon to also call
-   `scripts/upload_image.py` and persist the resulting URL.
+### Widget shows field names but no values
 
-The helper uploads a local image and prints the Discord CDN URL on
-stdout, so you can `$(python scripts/upload_image.py ...)` to capture it
-into an environment variable for the next step.
+Your widget editor field names don't match the daemon's. Open the editor
+and check each field's Name exactly.
+
+### Widget shows the widget shell but no data at all
+
+The PATCH might be failing silently. Check the workflow logs for errors.
+
+### Image slot is empty
+
+You didn't create `DISCORD_TARGET_CHANNEL_ID` as a Secret, or the bot
+lacks permissions in the channel.
+
+### 401 / Unauthorized errors in the logs
+
+The bot token was rotated. Reset it in the Developer Portal and update
+the `DISCORD_BOT_TOKEN` Secret.
+
+### Widget updates then stops
+
+The daemon's runtime budget elapsed. It will be re-triggered by the 6h
+`schedule:` cron. To reduce the gap, run the workflow manually.
+
+## Next steps
+
+- Read [HOSTING.md](HOSTING.md) to understand the GitHub Actions daemon
+- Read [RATE_LIMITS.md](RATE_LIMITS.md) to understand quota math
+- Read [ARCHITECTURE.md](ARCHITECTURE.md) for module-level design
